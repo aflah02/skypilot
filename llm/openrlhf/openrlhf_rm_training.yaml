@@ -10,12 +10,6 @@ resources:
     idle_minutes: 2 # Auto-stop after 2 minutes of idleness.
   image_id: docker:nvcr.io/nvidia/pytorch:25.02-py3
 
-config:
-  docker:
-    run_options:
-      - -v $PWD:/openrlhf
-      - -v /checkpoints:/checkpoints
-
 envs:
   WANDB_TOKEN: null # Pass with `--secret WANDB_TOKEN` in CLI
 
