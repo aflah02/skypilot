@@ -84,6 +84,7 @@ user_table = sqlalchemy.Table(
     sqlalchemy.Column('name', sqlalchemy.Text),
     sqlalchemy.Column('password', sqlalchemy.Text),
     sqlalchemy.Column('created_at', sqlalchemy.Integer),
+    sqlalchemy.Column('type', sqlalchemy.Text, server_default=None),
 )
 
 cluster_table = sqlalchemy.Table(
@@ -129,6 +130,8 @@ cluster_table = sqlalchemy.Table(
     sqlalchemy.Column('cloud', sqlalchemy.Text, server_default=None),
     sqlalchemy.Column('region', sqlalchemy.Text, server_default=None),
     sqlalchemy.Column('zone', sqlalchemy.Text, server_default=None),
+    # Node names for dashboard display (comma-separated)
+    sqlalchemy.Column('node_names', sqlalchemy.Text, server_default=None),
 )
 
 storage_table = sqlalchemy.Table(
@@ -208,6 +211,8 @@ cluster_history_table = sqlalchemy.Table(
     sqlalchemy.Column('cloud', sqlalchemy.Text, server_default=None),
     sqlalchemy.Column('region', sqlalchemy.Text, server_default=None),
     sqlalchemy.Column('zone', sqlalchemy.Text, server_default=None),
+    # Node names for dashboard display (comma-separated)
+    sqlalchemy.Column('node_names', sqlalchemy.Text, server_default=None),
 )
 
 
@@ -461,10 +466,13 @@ def add_or_update_user(
 
             # First try INSERT OR IGNORE - this won't fail if user exists
             insert_stmnt = insert_func(user_table).prefix_with(
-                'OR IGNORE').values(id=user.id,
-                                    name=user.name,
-                                    password=user.password,
-                                    created_at=created_at)
+                'OR IGNORE').values(
+                    id=user.id,
+                    name=user.name,
+                    password=user.password,
+                    created_at=created_at,
+                    type=user.user_type,
+                )
             use_returning = return_user and _sqlite_supports_returning()
             if use_returning:
                 insert_stmnt = insert_stmnt.returning(
@@ -472,6 +480,7 @@ def add_or_update_user(
                     user_table.c.name,
                     user_table.c.password,
                     user_table.c.created_at,
+                    user_table.c.type,
                 )
             result = session.execute(insert_stmnt)
 
@@ -489,13 +498,19 @@ def add_or_update_user(
                 update_values = {user_table.c.name: user.name}
                 if user.password:
                     update_values[user_table.c.password] = user.password
+                if user.user_type:
+                    update_values[user_table.c.type] = user.user_type
 
                 update_stmnt = sqlalchemy.update(user_table).where(
                     user_table.c.id == user.id).values(update_values)
                 if use_returning:
                     update_stmnt = update_stmnt.returning(
-                        user_table.c.id, user_table.c.name,
-                        user_table.c.password, user_table.c.created_at)
+                        user_table.c.id,
+                        user_table.c.name,
+                        user_table.c.password,
+                        user_table.c.created_at,
+                        user_table.c.type,
+                    )
 
                 result = session.execute(update_stmnt)
                 if use_returning:
@@ -509,10 +524,13 @@ def add_or_update_user(
                     # so we need to do a separate query
                     row = session.query(user_table).filter_by(
                         id=user.id).first()
-                updated_user = models.User(id=row.id,
-                                           name=row.name,
-                                           password=row.password,
-                                           created_at=row.created_at)
+                updated_user = models.User(
+                    id=row.id,
+                    name=row.name,
+                    password=row.password,
+                    created_at=row.created_at,
+                    user_type=row.type,
+                )
                 return was_inserted, updated_user
             else:
                 return was_inserted
@@ -527,7 +545,9 @@ def add_or_update_user(
                 id=user.id,
                 name=user.name,
                 password=user.password,
-                created_at=created_at)
+                created_at=created_at,
+                type=user.user_type,
+            )
 
             # Use a sentinel in the RETURNING clause to detect insert vs update
             if user.password:
@@ -537,12 +557,15 @@ def add_or_update_user(
                 }
             else:
                 set_ = {user_table.c.name: user.name}
+            if user.user_type:
+                set_[user_table.c.type] = user.user_type
             upsert_stmnt = insert_stmnt.on_conflict_do_update(
                 index_elements=[user_table.c.id], set_=set_).returning(
                     user_table.c.id,
                     user_table.c.name,
                     user_table.c.password,
                     user_table.c.created_at,
+                    user_table.c.type,
                     # This will be True for INSERT, False for UPDATE
                     sqlalchemy.literal_column('(xmax = 0)').label('was_inserted'
                                                                  ))
@@ -554,10 +577,13 @@ def add_or_update_user(
             session.commit()
 
             if return_user:
-                updated_user = models.User(id=row.id,
-                                           name=row.name,
-                                           password=row.password,
-                                           created_at=row.created_at)
+                updated_user = models.User(
+                    id=row.id,
+                    name=row.name,
+                    password=row.password,
+                    created_at=row.created_at,
+                    user_type=row.type,
+                )
                 return was_inserted, updated_user
             else:
                 return was_inserted
@@ -573,10 +599,13 @@ def get_user(user_id: str) -> Optional[models.User]:
         row = session.query(user_table).filter_by(id=user_id).first()
     if row is None:
         return None
-    return models.User(id=row.id,
-                       name=row.name,
-                       password=row.password,
-                       created_at=row.created_at)
+    return models.User(
+        id=row.id,
+        name=row.name,
+        password=row.password,
+        created_at=row.created_at,
+        user_type=row.type,
+    )
 
 
 @_init_db
@@ -587,10 +616,13 @@ def get_users(user_ids: Set[str]) -> Dict[str, models.User]:
         rows = session.query(user_table).filter(
             user_table.c.id.in_(user_ids)).all()
     return {
-        row.id: models.User(id=row.id,
-                            name=row.name,
-                            password=row.password,
-                            created_at=row.created_at) for row in rows
+        row.id: models.User(
+            id=row.id,
+            name=row.name,
+            password=row.password,
+            created_at=row.created_at,
+            user_type=row.type,
+        ) for row in rows
     }
 
 
@@ -602,10 +634,13 @@ def get_user_by_name(username: str) -> List[models.User]:
     if len(rows) == 0:
         return []
     return [
-        models.User(id=row.id,
-                    name=row.name,
-                    password=row.password,
-                    created_at=row.created_at) for row in rows
+        models.User(
+            id=row.id,
+            name=row.name,
+            password=row.password,
+            created_at=row.created_at,
+            user_type=row.type,
+        ) for row in rows
     ]
 
 
@@ -616,8 +651,12 @@ def get_user_by_name_match(username_match: str) -> List[models.User]:
         rows = session.query(user_table).filter(
             user_table.c.name.like(f'%{username_match}%')).all()
     return [
-        models.User(id=row.id, name=row.name, created_at=row.created_at)
-        for row in rows
+        models.User(
+            id=row.id,
+            name=row.name,
+            created_at=row.created_at,
+            user_type=row.type,
+        ) for row in rows
     ]
 
 
@@ -636,10 +675,13 @@ def get_all_users() -> List[models.User]:
     with orm.Session(_SQLALCHEMY_ENGINE) as session:
         rows = session.query(user_table).all()
     return [
-        models.User(id=row.id,
-                    name=row.name,
-                    password=row.password,
-                    created_at=row.created_at) for row in rows
+        models.User(
+            id=row.id,
+            name=row.name,
+            password=row.password,
+            created_at=row.created_at,
+            user_type=row.type,
+        ) for row in rows
     ]
 
 
@@ -696,6 +738,13 @@ def add_or_update_cluster(cluster_name: str,
             region = str(lr.region) if getattr(lr, 'region', None) else None
             zone = str(lr.zone) if getattr(lr, 'zone', None) else None
 
+    # Extract node_names from cached_cluster_info and merge with lineage
+    current_names = None
+    if hasattr(cluster_handle, 'cached_cluster_info'):
+        ci = cluster_handle.cached_cluster_info
+        if ci is not None:
+            current_names = ci.get_node_names()
+
     # TODO (sumanth): Cluster history table will have multiple entries
     # when the cluster failover through multiple regions (one entry per region).
     # It can be more inaccurate for the multi-node cluster
@@ -746,6 +795,12 @@ def add_or_update_cluster(cluster_name: str,
         # is called, or until the code escapes the with block.
         cluster_row = session.query(cluster_table).filter_by(
             name=cluster_name).with_for_update().first()
+
+        # Merge current node names into existing lineage
+        existing_node_names = (cluster_row.node_names if cluster_row else None)
+        node_names = common_utils.merge_node_names_lineage(
+            existing_node_names, current_names)
+
         if (not cluster_row or
                 cluster_row.status == status_lib.ClusterStatus.STOPPED.value):
             conditional_values.update({
@@ -792,6 +847,7 @@ def add_or_update_cluster(cluster_name: str,
                     cluster_table.c.cloud: cloud,
                     cluster_table.c.region: region,
                     cluster_table.c.zone: zone,
+                    cluster_table.c.node_names: node_names,
                 })
             assert count <= 1
             if count == 0:
@@ -812,6 +868,7 @@ def add_or_update_cluster(cluster_name: str,
                 cloud=cloud,
                 region=region,
                 zone=zone,
+                node_names=node_names,
             )
             insert_or_update_stmt = insert_stmnt.on_conflict_do_update(
                 index_elements=[cluster_table.c.name],
@@ -828,6 +885,7 @@ def add_or_update_cluster(cluster_name: str,
                     cluster_table.c.cloud: cloud,
                     cluster_table.c.region: region,
                     cluster_table.c.zone: zone,
+                    cluster_table.c.node_names: node_names,
                 })
             session.execute(insert_or_update_stmt)
 
@@ -866,6 +924,7 @@ def add_or_update_cluster(cluster_name: str,
             cloud=cloud,
             region=region,
             zone=zone,
+            node_names=node_names,
             **creation_info,
         )
         do_update_stmt = insert_stmnt.on_conflict_do_update(
@@ -887,6 +946,7 @@ def add_or_update_cluster(cluster_name: str,
                 cluster_history_table.c.cloud: cloud,
                 cluster_history_table.c.region: region,
                 cluster_history_table.c.zone: zone,
+                cluster_history_table.c.node_names: node_names,
                 **creation_info,
             })
         session.execute(do_update_stmt)
@@ -1212,9 +1272,27 @@ def update_cluster_handle(cluster_name: str,
                           cluster_handle: 'backends.ResourceHandle'):
     assert _SQLALCHEMY_ENGINE is not None
     handle = pickle.dumps(cluster_handle)
+
+    # Extract current node names and merge with existing lineage
+    current_names = None
+    if hasattr(cluster_handle, 'cached_cluster_info'):
+        ci = cluster_handle.cached_cluster_info
+        if ci is not None:
+            current_names = ci.get_node_names()
+
+    update_dict: Dict[Any, Any] = {cluster_table.c.handle: handle}
+
     with orm.Session(_SQLALCHEMY_ENGINE) as session:
-        session.query(cluster_table).filter_by(name=cluster_name).update(
-            {cluster_table.c.handle: handle})
+        if current_names is not None:
+            row = session.query(cluster_table.c.node_names).filter_by(
+                name=cluster_name).with_for_update().first()
+            existing_json = row.node_names if row else None
+            node_names = common_utils.merge_node_names_lineage(
+                existing_json, current_names)
+            update_dict[cluster_table.c.node_names] = node_names
+
+        session.query(cluster_table).filter_by(
+            name=cluster_name).update(update_dict)
         session.commit()
 
 
@@ -1885,6 +1963,7 @@ def get_clusters(
         cluster_table.c.cluster_ever_up,
         cluster_table.c.user_hash,
         cluster_table.c.workspace,
+        cluster_table.c.node_names,
         user_table.c.name.label('user_name'),
     ]
     if not summary_response:
@@ -1962,6 +2041,7 @@ def get_clusters(
             'workspace': row.workspace,
             'is_managed': False
                           if exclude_managed_clusters else bool(row.is_managed),
+            'node_names': common_utils.get_display_node_names(row.node_names),
         }
         if not summary_response:
             record['last_creation_yaml'] = row.last_creation_yaml
@@ -2027,7 +2107,8 @@ def get_clusters_from_history(
                 cluster_history_table.c.user_hash,
                 cluster_history_table.c.workspace.label('history_workspace'),
                 cluster_history_table.c.last_activity_time,
-                cluster_history_table.c.launched_at, cluster_table.c.status,
+                cluster_history_table.c.launched_at,
+                cluster_history_table.c.node_names, cluster_table.c.status,
                 cluster_table.c.workspace)
         else:
             query = session.query(
@@ -2040,7 +2121,8 @@ def get_clusters_from_history(
                 cluster_history_table.c.last_creation_command,
                 cluster_history_table.c.workspace.label('history_workspace'),
                 cluster_history_table.c.last_activity_time,
-                cluster_history_table.c.launched_at, cluster_table.c.status,
+                cluster_history_table.c.launched_at,
+                cluster_history_table.c.node_names, cluster_table.c.status,
                 cluster_table.c.workspace)
 
         query = query.select_from(
@@ -2129,6 +2211,7 @@ def get_clusters_from_history(
             'user_name': user_name,
             'workspace': workspace,
             'last_event': last_event,
+            'node_names': common_utils.get_display_node_names(row.node_names),
         }
         if not abbreviate_response:
             record['last_creation_yaml'] = row.last_creation_yaml
